@@ -133,8 +133,7 @@ After the site is broken, trainees see a list of **symptom descriptions** — wh
 
 </details>
 
-<details>
-## Recovery Tools
+<details>  <summary>Recovery Tools</summary>
 
 Trainees are expected to use standard WordPress recovery methods:
 
