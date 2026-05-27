@@ -1,6 +1,8 @@
 
 # WP Breaker ☠️
 
+![WP Breaker](wpbreaker.png)
+
 > A controlled demolition tool for WordPress developer training.
 
 **WP Breaker is a single PHP file that intentionally breaks a WordPress site in realistic, fixable ways — designed for trainers, educators, and developers who want to practice real-world WordPress recovery skills.**
