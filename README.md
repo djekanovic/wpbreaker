@@ -29,39 +29,25 @@ Trainees see a list of **vague symptom descriptions** (no spoilers) and have acc
 
 ## Difficulty Levels
 
-Level
 
-Shield
 
-Experience
-
-**Easy**
-
-🟢
+**Easy** 🟢
 
 Something is clearly wrong. Symptoms are loud. A fresh pair of eyes should crack it.
 
-**Medium**
-
-🔵
+**Medium** 🔵
 
 The site misbehaves in multiple ways. Some issues hide behind others.
 
-**Hard**
-
-🟠
+**Hard** 🟠
 
 Errors point in the wrong direction. Fixing one thing reveals another.
 
-**Ultimate**
-
-🔴
+**Ultimate** 🔴
 
 Multiple layers of damage. Admin access is compromised. Requires real skill.
 
-**Unfixable**
-
-☠️
+**Unfixable** ☠️
 
 It is fixable. You will question that. Good luck.
 
@@ -135,11 +121,11 @@ After the site is broken, trainees see a list of **symptom descriptions** — wh
 
 </details>
 
-<details>  <summary>Recovery Tools</summary>
+<details>  <summary>Tools</summary>
 
 Trainees are expected to use standard WordPress recovery methods:
 
--   **WP-CLI** — the primary tool for most fixes
+-   **WP-CLI** — tool for experienced devs
 -   **phpMyAdmin / Adminer** — direct database access
 -   **FTP / SFTP / File Manager** — for file-level issues
 -   **Hosting control panel** — for permission and PHP config fixes
