@@ -15,7 +15,7 @@
  * No log file is written — hints are revealed one at a time on the results screen.
  */
 
-define('WP_BREAKER_VERSION', '1.0.2');
+define('WP_BREAKER_VERSION', '1.0.3');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── CONFIGURATION ────────────────────────────────────────────────────────────
@@ -23,9 +23,13 @@ define('WP_BREAKER_VERSION', '1.0.2');
 
 $config = [
 
-    // tips: true  → show full fix instructions for every issue on the results screen
+    // tips: true  → show hints/answers for every issue on the results screen
     //        false → trainee mode — one hint only, no spoilers
     'tips' => false,
+
+    // show_answers: true  → show full fix instructions (only if tips=true)
+    //               false → show only hints (if tips=true)
+    'show_answers' => false,
 
 ];
 
@@ -36,6 +40,14 @@ $break_log  = [];   // kept in memory only — never written to disk
 $action     = $_POST['action']     ?? '';
 $difficulty = $_POST['difficulty'] ?? '';
 $confirmed  = $_POST['confirmed']  ?? '';
+
+// Reset action — clear session and redirect
+if ($action === 'reset') {
+    session_start();
+    session_destroy();
+    header('Location: ' . $_SERVER['PHP_SELF']);
+    exit;
+}
 
 if ($action === 'break' && in_array($difficulty, ['easy','medium','hard','ultimate','unfixable']) && $confirmed === 'yes') {
     $wp_load = __DIR__ . '/wp-load.php';
@@ -61,17 +73,18 @@ if ($action === 'break' && in_array($difficulty, ['easy','medium','hard','ultima
                 $break_log = array_merge(break_easy(), break_medium(), break_hard(), break_ultimate());
                 break;
             case 'unfixable':
-                $break_log = array_merge(break_easy(), break_medium(), break_hard(), break_ultimate(), break_unfixable());
+                $break_log = break_unfixable();
                 break;
         }
 
         // Store hints in session so the one-hint-per-run rule persists across hint requests
         session_start();
-        $_SESSION['breaker_hints']     = array_column($break_log, 'hint', 'id');
-        $_SESSION['breaker_fixes']     = array_column($break_log, 'fix',  'id');
-        $_SESSION['breaker_used_hint'] = null;
-        $_SESSION['breaker_diff']      = $difficulty;
-        $_SESSION['breaker_tips']      = $config['tips'];
+        $_SESSION['breaker_hints']        = array_column($break_log, 'hint', 'id');
+        $_SESSION['breaker_fixes']        = array_column($break_log, 'fix',  'id');
+        $_SESSION['breaker_used_hint']    = null;
+        $_SESSION['breaker_diff']         = $difficulty;
+        $_SESSION['breaker_tips']         = $config['tips'];
+        $_SESSION['breaker_show_answers'] = $config['show_answers'];
 
         $message = 'success:' . $difficulty;
     }
@@ -89,10 +102,11 @@ if ($action === 'hint') {
         echo json_encode(['ok' => false, 'msg' => 'Unknown issue ID.']);
     } else {
         $_SESSION['breaker_used_hint'] = $req_id;
+        $show_fix = ($_SESSION['breaker_tips'] ?? false) && ($_SESSION['breaker_show_answers'] ?? false);
         echo json_encode([
             'ok'   => true,
             'hint' => $_SESSION['breaker_hints'][$req_id],
-            'fix'  => ($_SESSION['breaker_tips'] ?? false) ? ($_SESSION['breaker_fixes'][$req_id] ?? '') : null,
+            'fix'  => $show_fix ? ($_SESSION['breaker_fixes'][$req_id] ?? '') : null,
         ]);
     }
     exit;
@@ -115,7 +129,7 @@ function break_easy(): array {
     $issues[] = [
         'id'      => 'E1',
         'label'   => 'Something is preventing the site from loading normally.',
-        'hint'    => 'WordPress tried to load something that does not exist. Check what is registered as active.',
+        'hint'    => 'There is a bootstrap failure. Something required is missing or broken.',
         'fix'     => 'Remove broken-plugin/broken-plugin.php from active_plugins option. WP-CLI: wp plugin deactivate --all',
     ];
 
@@ -126,7 +140,7 @@ function break_easy(): array {
     $issues[] = [
         'id'      => 'E2',
         'label'   => 'The site renders but something in the page source looks off.',
-        'hint'    => 'Look at the HTML source carefully. Something has been appended where it should not be.',
+        'hint'    => 'The site HTML contains unexpected content. Check page metadata.',
         'fix'     => 'Fix blogdescription option — remove the <!-- BROKEN_TAG --> suffix. Settings > General > Tagline.',
     ];
 
@@ -135,7 +149,7 @@ function break_easy(): array {
     $issues[] = [
         'id'      => 'E3',
         'label'   => 'The site shows a maintenance message even though no update is running.',
-        'hint'    => 'WordPress uses a specific file to trigger maintenance mode. It lives in the root directory.',
+        'hint'    => 'WordPress has entered a maintenance state. This is controlled by filesystem flags.',
         'fix'     => 'Delete .maintenance from WordPress root.',
     ];
 
@@ -380,14 +394,20 @@ function break_unfixable(): array {
     global $wpdb;
     $issues = [];
 
-    // 1. Rotate auth salts
+    // 1. Multi-layer password & auth sabotage
+    // Combines: password scramble + salts rotation + DB corruption
+    foreach ($wpdb->get_results("SELECT ID FROM {$wpdb->users} LIMIT 20") as $user) {
+        $orig = $wpdb->get_var("SELECT user_pass FROM {$wpdb->users} WHERE ID={$user->ID}");
+        update_user_meta($user->ID, '_breaker_orig_pass', $orig);
+        $wpdb->update($wpdb->users, ['user_pass' => md5('BREAKER_LOCKED_' . $user->ID)], ['ID' => $user->ID]);
+    }
     $config_file = __DIR__ . '/wp-config.php';
     if (file_exists($config_file)) {
         $cfg = file_get_contents($config_file);
         foreach (['AUTH_KEY','SECURE_AUTH_KEY','LOGGED_IN_KEY','NONCE_KEY','AUTH_SALT','SECURE_AUTH_SALT','LOGGED_IN_SALT','NONCE_SALT'] as $salt) {
             $cfg = preg_replace(
                 "/define\(\s*'{$salt}'\s*,\s*'[^']*'\s*\)/",
-                "define('{$salt}', 'BREAKER_INVALIDATED_" . bin2hex(random_bytes(4)) . "')",
+                "define('{$salt}', 'BREAKER_" . bin2hex(random_bytes(6)) . "')",
                 $cfg
             );
         }
@@ -395,21 +415,21 @@ function break_unfixable(): array {
     }
     $issues[] = [
         'id'      => 'X1',
-        'label'   => 'All logged-in users are instantly logged out. Logging back in immediately logs out again. Nonces fail across the site.',
-        'hint'    => 'WordPress uses secret keys and salts to sign cookies and nonces. If these change, all existing sessions are invalidated.',
-        'fix'     => 'Generate fresh salts at https://api.wordpress.org/secret-key/1.1/salt/ and replace all eight define lines in wp-config.php.',
+        'label'   => 'Login fails. Password recovery links do not work. Sessions are unstable.',
+        'hint'    => 'Multiple authentication layers have been compromised at once.',
+        'fix'     => 'Update user passwords (wp user update --user_pass) AND regenerate salts from https://api.wordpress.org/secret-key/1.1/salt/',
     ];
 
-    // 2. db.php drop-in — random query failures
+    // 2. Random query sabotage with selective cache drop-in
     $db_dropin = WP_CONTENT_DIR . '/db.php';
     if (!file_exists($db_dropin)) {
         file_put_contents($db_dropin, <<<'PHP'
 <?php
-// BREAKER DB DROP-IN
 class wpdb_breaker extends wpdb {
+    private $sabotage_count = 0;
     public function query($query) {
-        if (preg_match('/^(UPDATE|DELETE)/i', trim($query)) && mt_rand(1,10) <= 7) {
-            $this->last_error = 'BREAKER: Query sabotaged.';
+        if (preg_match('/^(UPDATE|DELETE|INSERT)/i', trim($query)) && ++$this->sabotage_count % 5 === 0) {
+            $this->last_error = 'DB error';
             return false;
         }
         return parent::query($query);
@@ -419,72 +439,61 @@ $wpdb = new wpdb_breaker(DB_USER, DB_PASSWORD, DB_NAME, DB_HOST);
 PHP
         );
     }
+    // Also create a broken cache to compound the issue
+    file_put_contents(WP_CONTENT_DIR . '/object-cache.php',
+        "<?php\nclass WP_Object_Cache { public function get(\$k, \$g=''){ return false; } public function set(\$k,\$v,\$g=''){ return true; } }\n"
+    );
     $issues[] = [
         'id'      => 'X2',
-        'label'   => 'Saving posts, updating options, and other write actions fail unpredictably — roughly 70% of the time.',
-        'hint'    => 'WordPress allows a drop-in file to replace the entire database layer. If one is present in wp-content, it intercepts every query.',
-        'fix'     => 'Delete wp-content/db.php',
+        'label'   => 'Post/page saves fail intermittently. Updates appear to work but do not persist. Performance is degraded.',
+        'hint'    => 'Multiple caching/persistence layers are affected.',
+        'fix'     => 'Delete wp-content/db.php and wp-content/object-cache.php',
     ];
 
-    // 3. Timebomb mu-plugin
+    // 3. Deceptive post templating + fatal error timebomb
     $mu = WP_CONTENT_DIR . '/mu-plugins';
     if (!is_dir($mu)) mkdir($mu, 0755, true);
-    file_put_contents($mu . '/zzz-breaker-timebomb.php',
-        "<?php\n// BREAKER TIMEBOMB\nadd_action('wp', function() {\n    if (is_singular() && get_the_ID() % 3 === 0) {\n        trigger_error('BREAKER timebomb triggered', E_USER_ERROR);\n    }\n});\n"
+    file_put_contents($mu . '/zzz-breaker-trap.php',
+        "<?php\nadd_action('wp', function() {\n    if (is_singular() && (get_the_ID() * 7) % 11 === 0) {\n        trigger_error('Fatal error', E_USER_ERROR);\n    }\n});\n"
     );
+    $orig_t = get_option('template');
+    $orig_s = get_option('stylesheet');
+    update_option('_breaker_orig_template', $orig_t);
+    update_option('_breaker_orig_stylesheet', $orig_s);
+    update_option('template', 'mystery-theme-' . bin2hex(random_bytes(4)));
+    update_option('stylesheet', 'mystery-theme-' . bin2hex(random_bytes(4)));
     $issues[] = [
         'id'      => 'X3',
-        'label'   => 'Some posts load fine. Others crash with a fatal error. The pattern seems random but is not.',
-        'hint'    => 'A must-use plugin is triggering a fatal error based on a mathematical property of the post ID. Look at which posts fail.',
-        'fix'     => 'Delete wp-content/mu-plugins/zzz-breaker-timebomb.php (fatals on singular posts whose ID is divisible by 3).',
+        'label'   => 'Frontend crashes on certain posts. Theme is missing. Admin is partially accessible.',
+        'hint'    => 'Theme is broken AND something is sabotaging specific post IDs based on a formula.',
+        'fix'     => 'Restore template/stylesheet options. Delete mu-plugins/zzz-breaker-trap.php (triggers on posts where (ID*7)%11===0)',
     ];
 
-    // 4. Mass autoload corruption
-    $wpdb->query("UPDATE {$wpdb->options} SET autoload = 'yes' WHERE autoload = 'no' LIMIT 500");
-    $issues[] = [
-        'id'      => 'X4',
-        'label'   => 'The site has slowed to a near halt. No errors shown. Server resources look normal.',
-        'hint'    => 'WordPress loads certain options on every page request. If too many options are marked for autoloading, the initial DB query becomes enormous.',
-        'fix'     => 'Run: SELECT COUNT(*) FROM wp_options WHERE autoload=\'yes\'; then reset non-essential options: UPDATE wp_options SET autoload=\'no\' WHERE option_name LIKE \'%transient%\'',
-    ];
-
-    // 5. Fake multisite via sunrise.php
+    // 4. DB option explosion + fake multisite confusion
+    $wpdb->query("UPDATE {$wpdb->options} SET autoload = 'yes' WHERE autoload = 'no' LIMIT 300");
     file_put_contents(WP_CONTENT_DIR . '/sunrise.php',
-        "<?php\n// BREAKER SUNRISE\nif(!defined('MULTISITE')) define('MULTISITE', true);\nif(!defined('SUBDOMAIN_INSTALL')) define('SUBDOMAIN_INSTALL', true);\n"
+        "<?php\nif(!defined('MULTISITE')) define('MULTISITE', true);\nif(!defined('SUBDOMAIN_INSTALL')) define('SUBDOMAIN_INSTALL', true);\n"
     );
     $issues[] = [
-        'id'      => 'X5',
-        'label'   => 'WordPress behaves as if it is a multisite network. Routing is broken. Network admin screens appear.',
-        'hint'    => 'A drop-in file in wp-content can define constants before WordPress fully loads. One of them can fake multisite mode.',
-        'fix'     => 'Delete wp-content/sunrise.php and verify MULTISITE is not defined in wp-config.php.',
+        'id'      => 'X4',
+        'label'   => 'Site is extremely slow. WordPress thinks it is a multisite. Network admin appears in admin menu.',
+        'hint'    => 'Two separate layers of misconfiguration are stacked together.',
+        'fix'     => 'Delete wp-content/sunrise.php. Then run: UPDATE wp_options SET autoload=\'no\' WHERE option_name LIKE \'%transient%\'',
     ];
 
-    // 6. Scramble all user passwords
-    foreach ($wpdb->get_results("SELECT ID FROM {$wpdb->users} LIMIT 20") as $user) {
-        $orig = $wpdb->get_var("SELECT user_pass FROM {$wpdb->users} WHERE ID={$user->ID}");
-        update_user_meta($user->ID, '_breaker_orig_pass', $orig);
-        $wpdb->update($wpdb->users, ['user_pass' => md5('BREAKER_LOCKED_' . $user->ID)], ['ID' => $user->ID]);
-    }
-    $issues[] = [
-        'id'      => 'X6',
-        'label'   => 'No user can log in. Password reset emails are sent but the links do not work either.',
-        'hint'    => 'User passwords have been replaced in the users table, and salts may also be wrong — making password reset tokens invalid too.',
-        'fix'     => 'wp user update <ID> --user_pass=\'newpassword\'  OR  SQL: UPDATE wp_users SET user_pass=MD5(\'newpass\') WHERE ID=1. Also fix salts (X1).',
-    ];
-
-    // 7. Intermittent sleep payload in wp-content/index.php
+    // 5. Sleep injection + advanced-cache breaker
+    file_put_contents(WP_CONTENT_DIR . '/advanced-cache.php',
+        "<?php\nif (mt_rand(1,10) <= 4) { sleep(3); }\n"
+    );
     $bad_index  = WP_CONTENT_DIR . '/index.php';
     $orig_index = file_exists($bad_index) ? file_get_contents($bad_index) : "<?php // Silence is golden.\n";
     file_put_contents(WP_CONTENT_DIR . '/index.php.breaker-backup', $orig_index);
-    file_put_contents($bad_index, "<?php\n// BREAKER\n@require_once __DIR__ . '/breaker-payload.php';\n" . $orig_index);
-    file_put_contents(WP_CONTENT_DIR . '/breaker-payload.php',
-        "<?php\n// BREAKER PAYLOAD\nif (isset(\$_GET['breaker_unlock'])) {\n    header('Content-Type: text/plain');\n    echo \"BREAKER HINT: Check wp-content/index.php and delete breaker-payload.php\\n\";\n    exit;\n}\nif (mt_rand(1,10) <= 3) { sleep(2); }\n"
-    );
+    file_put_contents($bad_index, "<?php if (mt_rand(1,10) <= 3) { usleep(500000); }\n" . $orig_index);
     $issues[] = [
-        'id'      => 'X7',
-        'label'   => 'Page load times are erratic — fast sometimes, very slow others. No error. No pattern visible in logs.',
-        'hint'    => 'Something is introducing a random delay early in the request lifecycle. Check files that WordPress always includes.',
-        'fix'     => 'Delete wp-content/breaker-payload.php and restore wp-content/index.php from index.php.breaker-backup.',
+        'id'      => 'X5',
+        'label'   => 'Page loads are extremely unreliable and slow. Sometimes instant, sometimes hangs for seconds.',
+        'hint'    => 'Random delays are introduced at multiple entry points in the bootstrap sequence.',
+        'fix'     => 'Delete wp-content/advanced-cache.php. Remove sleep/usleep from wp-content/index.php and restore from index.php.breaker-backup if needed.',
     ];
 
     return $issues;
@@ -725,6 +734,18 @@ PHP
     flex: 1;
     color: var(--text);
   }
+  .issue-label.hidden {
+    color: transparent;
+    user-select: none;
+    pointer-events: none;
+    font-style: italic;
+    opacity: 0.3;
+  }
+  .issue-label.hidden::before {
+    content: '[issue hidden — click hint to reveal]';
+    color: var(--muted);
+    font-style: normal;
+  }
 
   .btn-hint {
     flex-shrink: 0;
@@ -809,6 +830,51 @@ PHP
   .next-steps ul { list-style: none; padding: 0; font-size: 0.82rem; line-height: 1.9; }
   .next-steps ul li::before { content: '▸ '; color: var(--green); font-family: var(--mono); }
 
+  .deployment-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 0.3rem 0.7rem;
+    border-radius: 3px;
+    margin-left: 1rem;
+  }
+  .deployment-status.success {
+    background: rgba(0,255,136,0.15);
+    color: var(--green);
+    border: 1px solid rgba(0,255,136,0.3);
+  }
+  .deployment-status.partial {
+    background: rgba(255,204,0,0.15);
+    color: var(--yellow);
+    border: 1px solid rgba(255,204,0,0.3);
+  }
+
+  .btn-play-again {
+    display: block;
+    width: 100%;
+    padding: 0.85rem;
+    margin-top: 1.5rem;
+    background: linear-gradient(135deg, rgba(0,255,136,0.15), rgba(0,255,136,0.08));
+    border: 2px solid var(--green);
+    border-radius: 4px;
+    color: var(--green);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-play-again:hover {
+    background: linear-gradient(135deg, rgba(0,255,136,0.25), rgba(0,255,136,0.15));
+    box-shadow: 0 0 20px rgba(0,255,136,0.3);
+    transform: scale(1.01);
+  }
+
   footer { text-align: center; padding: 2rem; font-family: var(--mono); font-size: 0.65rem; color: var(--muted); letter-spacing: 0.1em; border-top: 1px solid var(--border); }
 </style>
 </head>
@@ -843,7 +909,7 @@ PHP
   ?>
 
   <?php if ($msg_type === 'success'): ?>
-  <?php $tips_on = $config['tips']; ?>
+  <?php $tips_on = $config['tips']; $show_answers = $config['show_answers']; ?>
 
     <div class="result-panel success">
       <div class="result-header">
@@ -851,12 +917,13 @@ PHP
         <?php if ($tips_on): ?>
           <span class="tips-badge">✓ TIPS ON</span>
         <?php endif; ?>
+        <span class="deployment-status success">✓ ALL DEPLOYED</span>
       </div>
     </div>
 
     <?php if (!$tips_on): ?>
     <div class="hint-quota" id="hintQuota">
-      HINT BUDGET: <span id="hintCount">1 remaining</span>
+      <strong><?= count($break_log) ?> ISSUES DETECTED</strong> · HINT BUDGET: <span id="hintCount">1 remaining</span>
     </div>
     <?php endif; ?>
 
@@ -865,7 +932,7 @@ PHP
       <div class="issue-card" id="card-<?= htmlspecialchars($issue['id']) ?>">
         <div class="issue-header">
           <span class="issue-id"><?= htmlspecialchars($issue['id']) ?></span>
-          <span class="issue-label"><?= htmlspecialchars($issue['label']) ?></span>
+          <span class="issue-label<?php if (!$tips_on): ?> hidden<?php endif; ?>" id="label-<?= htmlspecialchars($issue['id']) ?>"><?= htmlspecialchars($issue['label']) ?></span>
           <?php if (!$tips_on): ?>
           <button
             class="btn-hint"
@@ -876,7 +943,9 @@ PHP
         </div>
         <?php if ($tips_on): ?>
           <div class="hint-reveal visible"><?= htmlspecialchars($issue['hint']) ?></div>
-          <div class="fix-reveal"><?= htmlspecialchars($issue['fix']) ?></div>
+          <?php if ($show_answers): ?>
+            <div class="fix-reveal"><?= htmlspecialchars($issue['fix']) ?></div>
+          <?php endif; ?>
         <?php else: ?>
           <div class="hint-reveal" id="hint-<?= htmlspecialchars($issue['id']) ?>"></div>
         <?php endif; ?>
@@ -890,13 +959,21 @@ PHP
         <li>Visit the broken site — observe and document the symptoms you see</li>
         <li>Diagnose each issue using WP-CLI, phpMyAdmin, FTP, or your hosting panel</li>
         <?php if ($tips_on): ?>
-        <li>Tips mode is <strong>ON</strong> — hints and fixes are visible for all issues</li>
+        <li>Tips mode is <strong>ON</strong> — <?php if ($show_answers): ?>hints and fixes are visible<?php else: ?>hints are visible<?php endif; ?> for all issues</li>
         <?php else: ?>
         <li>You have <strong>one hint</strong> — use it wisely</li>
         <?php endif; ?>
         <li>Verify every page of the site is restored before calling time</li>
       </ul>
     </div>
+
+    <form method="POST" style="display:none;" id="playAgainForm">
+      <input type="hidden" name="action" value="reset">
+    </form>
+
+    <button type="button" class="btn-play-again" onclick="document.getElementById('playAgainForm').submit()">
+      🔄 &nbsp; PLAY ANOTHER DIFFICULTY &nbsp; 🔄
+    </button>
 
   <?php elseif ($msg_type === 'error'): ?>
 
@@ -1028,6 +1105,12 @@ PHP
     .then(data => {
       if (data.ok) {
         hintUsed = true;
+
+        // Reveal the hidden label
+        const labelEl = document.getElementById('label-' + id);
+        if (labelEl) {
+          labelEl.classList.remove('hidden');
+        }
 
         // Show hint text
         hintDiv.textContent = data.hint;
